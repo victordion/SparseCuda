@@ -4,7 +4,10 @@
 #include <stdlib.h>
 #include <cmath>
 #include <ctime>
-#define DEBUG
+#include <cuda.h>
+//#define DEBUG
+//#define HANDLE_ERROR(x) if((x) != 0) cout << "Error!" << endl;
+
 using namespace std;
 
 struct SubBlock{
@@ -17,20 +20,30 @@ struct SubBlock{
     int * nnz_local_c_idx;
     float * nnz_values;
 };
+//void printSubBlocksInfo(SubBlock * sbs, int nsbs, int mem_b_size);
 
 __global__ void CudaCompute(SubBlock * d_sbs, float * d_x, float * d_y, int nblocks, int mem_b_size, int nrows, int ncols , float * sub_y_arr){
         /*
             sub_y_arr stores float number, with nblocks rows, mem_b_size columns
         */
-        
-        if(blockIdx.x >= nblocks)
-            return;
-
+        //#ifdef DEBUG
         //printf("This is Cuda Block # %d: \n", blockIdx.x);
-        SubBlock * work_sb = &d_sbs[blockIdx.x];
+        //#endif
 
+        //if(blockIdx.x >= nblocks)
+        //    return;
+
+        
+        //SubBlock * work_sb = &d_sbs[blockIdx.x];
+
+
+        //printSubBlocksInfo(work_sb, 1, mem_b_size);
+
+        /*
         float * x_sub = (float *) malloc(mem_b_size * sizeof(float));
         float * y_sub = (float *) malloc(mem_b_size * sizeof(float));
+        //float * x;
+
 
         for(int i = 0; i < mem_b_size; i++){
             if(work_sb->nnz_global_i_idx[i] > 0 && work_sb->nnz_global_i_idx[i] <= ncols){
@@ -44,24 +57,34 @@ __global__ void CudaCompute(SubBlock * d_sbs, float * d_x, float * d_y, int nblo
         }
 
         for(int i = 0; i < work_sb->nnz; i++){
-            y_sub[work_sb->nnz_local_r_idx[i] - 1] += work_sb->nnz_values[i] * x_sub[work_sb->nnz_local_c_idx[i] - 1];
+            int x_sub_idx = work_sb->nnz_local_c_idx[i] - 1;
+            int y_sub_idx = work_sb->nnz_local_r_idx[i] - 1;
+            y_sub[y_sub_idx] += work_sb->nnz_values[i] * x_sub[x_sub_idx];
+            //#ifdef DEBUG
+            //    printf("This is Cuda Block # %d:  Computing (%d, %d) product as (%f)\n", blockIdx.x, x_sub_idx, y_sub_idx, work_sb->nnz_values[i] * x_sub[x_sub_idx]);
+            //#endif
         }
 
         for(int i = 0; i < mem_b_size; i++){
             sub_y_arr[blockIdx.x * mem_b_size + i] = y_sub[i];
         }
+        */
 
 }
 
 __global__ void CudaMergeResults(SubBlock * d_sbs, float * d_x, float * d_y, int nblocks, int mem_b_size, int nrows, int ncols , float * sub_y_arr){
-
-    for(int i = 0; i < nblocks; i++){
-        int * outLocs = d_sbs[i].nnz_global_o_idx;
-        for(int j = 0; j < mem_b_size; j++){
+    if(blockIdx.x == 0 && threadIdx.x == 0){
+        for(int i = 0; i < nblocks; i++){
+            int * outLocs = d_sbs[i].nnz_global_o_idx;
+            for(int j = 0; j < mem_b_size; j++){
             
-            d_y[outLocs[j] - 1] += sub_y_arr[i * mem_b_size + j];
+                d_y[outLocs[j] - 1] += sub_y_arr[i * mem_b_size + j];
+            }
         }
     }
+}
+
+__global__ void cudaDummy(){
 }
 
 void printSubBlocksInfo(SubBlock * sbs, int nsbs, int mem_b_size){
@@ -90,12 +113,12 @@ void printSubBlocksInfo(SubBlock * sbs, int nsbs, int mem_b_size){
     cout << endl;
 }
 
-void randomizeFloatVector(float * vec, int size){
+__host__ void randomizeFloatVector(float * vec, int size){
     for(int i = 0; i < size; i++){
-        float r = static_cast <float> (rand()) / static_cast <float> (RAND_MAX);
-        vec[i] = r;
+        float r = ((float) rand()) /  (RAND_MAX);
+        *(vec+i) = r;
     }
-    printf("\n\n");
+    //printf("\n\n");
 }
 
 void displayFloatVector(float * vec, int size){
@@ -112,7 +135,13 @@ void setZeroFloatVector(float * vec, int size){
 }
 
 int main(){
-    srand (static_cast <unsigned> (time(0)));
+
+    int count;
+    cudaGetDeviceCount(&count);
+    cout << "There are " << count << " GPU devices available. " << endl;  
+    cudaSetDevice(1);  
+
+    srand ( time(0));
     ifstream datafile;
     //datafile.open("../data/blockmatrix.data");
     datafile.open("../data/data");
@@ -121,6 +150,32 @@ int main(){
     float density;
     datafile >> nblocks >>  nrows >> ncols >> mem_b_size;
     
+
+    float * x;
+    float * y;
+    float * d_x;
+    float * d_y;
+
+    x = (float *)  malloc(ncols * sizeof(float));
+    y = (float *) malloc(nrows * sizeof(float));
+    
+    
+    // fixed a nightmare bug here on 04/11/2015
+    // originally it was:
+    // randomizeFloatVector(x, ncols * sizeof(float) );
+    randomizeFloatVector(x, ncols );
+    setZeroFloatVector(y, nrows );
+
+    
+    int d_x_size = ncols * sizeof(float);
+    int d_y_size = nrows * sizeof(float);
+    
+    cudaMalloc((void **) &d_x, d_x_size) ;
+    int ErrorCode = cudaGetLastError();
+    cout << ErrorCode << endl;
+
+    
+
     SubBlock * sbs = NULL;
     SubBlock * d_sbs;
 
@@ -163,33 +218,47 @@ int main(){
     cudaMalloc((void **) &d_sbs, sbs_size);
     cudaMemcpy(d_sbs, sbs, sbs_size, cudaMemcpyHostToDevice);
 
-    float * x = NULL;
-    float * y = NULL;
-    float * d_x = NULL;
-    float * d_y = NULL;
 
-    x = (float *) malloc(ncols * sizeof(float));
-    y = (float *) malloc(nrows * sizeof(float));
-    randomizeFloatVector(x, ncols * sizeof(float));
-    setZeroFloatVector(y, nrows * sizeof(float));
 
-    cudaMalloc((void **) & d_x, ncols * sizeof(float));
-    cudaMalloc((void **) & d_y, nrows * sizeof(float));
+
+
+    cudaMalloc((void **) &d_y, d_y_size);
     cudaMemcpy(d_x, x, ncols * sizeof(float), cudaMemcpyHostToDevice);
     cudaMemcpy(d_y, y, nrows * sizeof(float), cudaMemcpyHostToDevice);
 
     float * d_sub_y_arr = NULL;
     cudaMalloc((void **) &d_sub_y_arr, nblocks * mem_b_size * sizeof(float));
     
-    CudaCompute<<<nblocks, 1>>>(d_sbs, d_x, d_y, nblocks, mem_b_size, nrows, ncols, d_sub_y_arr);
-    cudaDeviceSynchronize();
+
+    CudaCompute<<<30, 1>>>(d_sbs, d_x, d_y, nblocks, mem_b_size, nrows, ncols, d_sub_y_arr);
+    ErrorCode = cudaGetLastError();
+    cout << "CudaCompute Error Code is " << endl; 
+    cout << ErrorCode << endl;
+    
+    cudaDummy<<<1, 1>>>();
+    ErrorCode = cudaGetLastError();
+    cout << "CudaCompute Error Code is " << endl; 
+    cout << ErrorCode << endl;
+
+    //cudaDeviceSynchronize();
     CudaMergeResults<<<1, 1>>>(d_sbs, d_x, d_y, nblocks, mem_b_size, nrows, ncols, d_sub_y_arr);
+    ErrorCode = cudaGetLastError();
+    cout << "CudaCompute Error Code is " << endl; 
+    cout << ErrorCode << endl;
 
     cudaMemcpy(y, d_y, nrows * sizeof(float), cudaMemcpyDeviceToHost);
 
     //displayFloatVector(x, ncols);
     //displayFloatVector(y, nrows);
+        
+    free(x);
+    free(y);
+    cudaFree(d_x);
+    cudaFree(d_y);
+    cudaFree(d_sub_y_arr);
 
+    cudaFree(d_sbs);
+    datafile.close();
     printf("Hello!\n");
     return 0;
 }
